@@ -1,0 +1,42 @@
+#include "hawkeye.h"
+
+#include <cstddef>
+
+hawkeye::hawkeye(CACHE* cache)
+    : replacement(cache), num_ways_(cache->NUM_WAY), optgen_(static_cast<std::size_t>(cache->NUM_SET), static_cast<std::size_t>(cache->NUM_WAY)),
+      predictor_(), rrpv_(static_cast<std::size_t>(cache->NUM_SET), std::vector<int>(static_cast<std::size_t>(cache->NUM_WAY), 7))
+{
+}
+
+long hawkeye::find_victim(uint32_t triggering_cpu, uint64_t instr_id, long set, const champsim::cache_block* current_set, champsim::address ip,
+                          champsim::address full_addr, access_type type)
+{
+  return static_cast<long>(::find_victim(rrpv_.at(static_cast<std::size_t>(set))));
+}
+
+void hawkeye::replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip,
+                                     champsim::address victim_addr, access_type type)
+{
+  const auto classification = predictor_.predict(ip.to<uint64_t>()) ? Classification::CACHE_FRIENDLY : Classification::CACHE_AVERSE;
+  update_rrpv(rrpv_.at(static_cast<std::size_t>(set)), static_cast<std::size_t>(way), classification, false);
+}
+
+void hawkeye::update_replacement_state(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip,
+                                       champsim::address victim_addr, access_type type, uint8_t hit)
+{
+  // Writebacks do not represent a load-PC reuse decision, so they must not
+  // train the OPT/predictor path. Their fill receives the normal RRIP update.
+  if (access_type{type} == access_type::WRITE)
+    return;
+
+  const auto pc = ip.to<uint64_t>();
+  const auto opt_hit = optgen_.access(static_cast<std::size_t>(set), full_addr.to<uint64_t>());
+  predictor_.train(pc, opt_hit);
+
+  // On a miss, ChampSim calls this hook before it has selected a victim, so
+  // `way` is outside the set. The corresponding fill is handled above.
+  if (hit != 0) {
+    const auto classification = predictor_.predict(pc) ? Classification::CACHE_FRIENDLY : Classification::CACHE_AVERSE;
+    update_rrpv(rrpv_.at(static_cast<std::size_t>(set)), static_cast<std::size_t>(way), classification, true);
+  }
+}
